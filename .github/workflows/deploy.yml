@@ -82,19 +82,11 @@ jobs:
     steps:
       - name: Get associated PRs
         id: prs
-        run: |
-          PULLS_JSON=$(gh api -H "Accept: application/vnd.github.v3+json" \
-            /repos/${{ github.repository }}/pulls \
-            -f state=open \
-            -f head=${{ github.repository_owner }}:${{ github.ref_name }})
-
-          PR_NUMBER=$(echo "$PULLS_JSON" | jq -r '.[0].number // empty')
-
-          if [ -n "$PR_NUMBER" ]; then
-            echo "pr-number=$PR_NUMBER" >> $GITHUB_OUTPUT
-          else
-            echo "pr-number=0" >> $GITHUB_OUTPUT
-          fi
+        run: >
+          echo "pulls=$(gh api -H "Accept: application/vnd.github.v3+json" -X GET
+          /repos/${{ github.repository }}/pulls
+          -f state=open
+          -f head=${{ github.repository_owner }}:${{ github.ref_name }})" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ github.token }}
 
