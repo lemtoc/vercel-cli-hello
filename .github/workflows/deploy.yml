@@ -1,0 +1,136 @@
+name: Deploy preview
+
+on:
+  push:
+    branches:
+      - "*"
+      - "!main" # main 以外のブランチで実行
+
+env:
+  ENV_NAME: preview-${{ github.ref_name }} # preview-[branch name]
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+
+    permissions:
+      deployments: write # bobheadxi/deployments に必要
+
+    outputs:
+      url: ${{ steps.deploy-url.outputs.url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Vercel CLI
+        run: pnpm add -g vercel@latest
+
+      - name: Start deployment
+        uses: bobheadxi/deployments@v1
+        id: deployment
+        with:
+          step: start
+          token: ${{ github.token }}
+          env: ${{ env.ENV_NAME }}
+
+      - name: Pull Vercel Environment Information
+        run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build Project Artifacts
+        run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy to Vercel
+        id: deploy-url
+        run: |
+          DEPLOY_URL=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+
+      - name: Update deployment status
+        uses: bobheadxi/deployments@v1
+        if: always()
+        with:
+          step: finish
+          token: ${{ github.token }}
+          status: ${{ job.status }}
+          env: ${{ steps.deployment.outputs.env }}
+          env_url: ${{ steps.deploy-url.outputs.url }}
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+
+  check-if-pr-exists:
+    needs: deploy
+    runs-on: ubuntu-latest
+
+    permissions:
+      pull-requests: read
+
+    outputs:
+      pr-number: ${{ steps.get-pr-number.outputs.pr-number }}
+
+    steps:
+      - name: Get associated PRs
+        id: prs
+        run: |
+          PULLS_JSON=$(gh api -H "Accept: application/vnd.github.v3+json" \
+            /repos/${{ github.repository }}/pulls \
+            -f state=open \
+            -f head=${{ github.repository_owner }}:${{ github.ref_name }})
+
+          PR_NUMBER=$(echo "$PULLS_JSON" | jq -r '.[0].number // empty')
+
+          if [ -n "$PR_NUMBER" ]; then
+            echo "pr-number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          else
+            echo "pr-number=0" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  comment:
+    needs:
+      - deploy
+      - check-if-pr-exists
+    runs-on: ubuntu-latest
+
+    permissions:
+      pull-requests: write
+
+    if: needs.check-if-pr-exists.outputs.pr-number != 0
+
+    steps:
+      - name: Find Comment
+        uses: peter-evans/find-comment@v2
+        id: fc
+        with:
+          issue-number: ${{ needs.check-if-pr-exists.outputs.pr-number }}
+          comment-author: github-actions[bot]
+          body-includes: preview
+
+      - name: Get datetime for now
+        id: datetime
+        run: echo "value=$(date)" >> $GITHUB_OUTPUT
+        env:
+          TZ: Asia/Tokyo
+
+      - name: Create or update comment
+        uses: peter-evans/create-or-update-comment@v2
+        with:
+          issue-number: ${{ needs.check-if-pr-exists.outputs.pr-number }}
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          body: |
+            :eyes: Visit the **preview** for this PR (updated for commit ${{ github.sha }}):
+            [![View the preview deployment at ${{ needs.deploy.outputs.url }}](https://img.shields.io/badge/-View_Preview-eee)](${{ needs.deploy.outputs.url }})
+            <sub>(:clock3: updated at ${{ steps.datetime.outputs.value }})</sub>
+          edit-mode: replace
